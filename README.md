@@ -29,6 +29,8 @@ The script requires:
 
 - Python 3
 - Syft
+- Docker or Podman
+- [Checkmarx CLI](https://docs.checkmarx.com/en/34965-68622-checkmarx-one-cli-installation.html)
 
 ### Install on macOS
 
