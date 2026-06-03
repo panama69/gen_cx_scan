@@ -89,7 +89,13 @@ def resolve_cx_path(cx_path, verbose=False):
 
 
 def extract_group_ids(syft_data, target_folders):
-    """Parses Syft JSON data and extracts unique Maven Group IDs found in target folders."""
+    """Parses Syft JSON data and extracts unique Maven Group IDs found in target folders.
+
+    Uses a fallback chain matching the provided jq criteria:
+    - prefer metadata.pomProperties.groupId
+    - fallback to the PURL namespace if groupId is missing
+    - only include artifacts whose locations start with a target folder
+    """
     group_ids = set()
 
     # Ensure paths end with a slash for clean matching
@@ -99,24 +105,27 @@ def extract_group_ids(syft_data, target_folders):
 
     artifacts = syft_data.get("artifacts", [])
     for artifact in artifacts:
-        # Check if the artifact belongs to a location in our target folder(s)
-        locations = artifact.get("locations", [])
-        in_target_folder = False
+        metadata = artifact.get("metadata") or {}
+        pom_properties = metadata.get("pomProperties") or {}
+        group_id = pom_properties.get("groupId")
 
+        if not group_id:
+            purl = artifact.get("purl")
+            if isinstance(purl, str) and purl:
+                purl_base = purl.split("?", 1)[0]
+                purl_parts = purl_base.split("/")
+                if len(purl_parts) > 1 and purl_parts[1]:
+                    group_id = purl_parts[1]
+
+        if not group_id:
+            continue
+
+        locations = artifact.get("locations", [])
         for loc in locations:
             path = loc.get("path", "")
             if any(path.startswith(folder) for folder in normalized_folders):
-                in_target_folder = True
-                break
-
-        if in_target_folder:
-            # Try to grab the Maven Group ID from metadata
-            metadata = artifact.get("metadata") or {}
-            pom_properties = metadata.get("pomProperties") or {}
-            group_id = pom_properties.get("groupId")
-
-            if group_id:
                 group_ids.add(group_id)
+                break
 
     return sorted(list(group_ids))
 
