@@ -6,18 +6,32 @@ import re
 import shlex
 import subprocess
 import sys
+from datetime import datetime
+from time import perf_counter
 
 
-def verbose_print(message, verbose):
+def timestamp_str():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def timestamp_print(message="", file=sys.stderr):
+    print(f"[{timestamp_str()}] {message}", file=file)
+
+
+def verbose_print(message, verbose, file=sys.stderr):
     if verbose:
-        print(message, file=sys.stderr)
+        timestamp_print(message, file=file)
+
+
+def format_duration(seconds):
+    return f"{seconds:.3f}s"
 
 
 def run_syft_scan(image_name, verbose=False):
     """Runs syft scan on the image and returns the parsed JSON output."""
-    print(f"[*] Running Syft scan on image: {image_name}...", file=sys.stderr)
+    timestamp_print(f"[*] Running Syft scan on image: {image_name}...", file=sys.stderr)
     if verbose:
-        print(f"    command: syft scan {image_name} -o json", file=sys.stderr)
+        timestamp_print(f"    command: syft scan {image_name} -o json", file=sys.stderr)
     try:
         result = subprocess.run(
             ["syft", "scan", image_name, "-o", "json"],
@@ -26,15 +40,16 @@ def run_syft_scan(image_name, verbose=False):
             check=True,
         )
         if verbose:
-            print("[+] Syft scan completed successfully.", file=sys.stderr)
-            print("[+] Syft raw output:", file=sys.stderr)
-            print(result.stdout, file=sys.stderr)
+            timestamp_print("[+] Syft scan completed successfully.", file=sys.stderr)
+            timestamp_print("[+] Syft raw output:", file=sys.stderr)
+            for raw_line in result.stdout.splitlines():
+                timestamp_print(raw_line, file=sys.stderr)
         return json.loads(result.stdout)
     except subprocess.CalledProcessError as e:
-        print(f"[-] Error executing Syft: {e.stderr}", file=sys.stderr)
+        timestamp_print(f"[-] Error executing Syft: {e.stderr}", file=sys.stderr)
         sys.exit(1)
     except json.JSONDecodeError:
-        print(
+        timestamp_print(
             "[-] Error: Failed to parse Syft output as JSON.", file=sys.stderr
         )
         sys.exit(1)
@@ -54,7 +69,7 @@ def resolve_cx_path(cx_path, verbose=False):
             if os.path.isfile(candidate_path) and os.access(candidate_path, os.X_OK):
                 verbose_print(f"[+] Found executable: {candidate_path}", verbose)
                 return candidate_path
-        print(
+        timestamp_print(
             "[-] Error: cx-path is a directory but no executable was found inside.",
             file=sys.stderr,
         )
@@ -63,13 +78,13 @@ def resolve_cx_path(cx_path, verbose=False):
     if os.path.isfile(cx_path):
         if os.access(cx_path, os.X_OK):
             return cx_path
-        print(
+        timestamp_print(
             f"[-] Error: cx-path exists but is not executable: {cx_path}",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    print(f"[-] Error: cx-path does not exist: {cx_path}", file=sys.stderr)
+    timestamp_print(f"[-] Error: cx-path does not exist: {cx_path}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -150,9 +165,13 @@ def main():
     args = parser.parse_args()
     cx_path = resolve_cx_path(args.cx_path, args.verbose)
 
+    total_start = perf_counter()
+    syft_start = perf_counter()
+
     # 1. Run Syft
     verbose_print("[>] Step 1: Run Syft scan and parse JSON output.", args.verbose)
     syft_output = run_syft_scan(args.image, args.verbose)
+    syft_elapsed = perf_counter() - syft_start
 
     # 2. Process and Filter Group IDs
     verbose_print(
@@ -162,7 +181,7 @@ def main():
     group_ids = extract_group_ids(syft_output, args.folders)
 
     if not group_ids:
-        print(
+        timestamp_print(
             f"[-] No Maven Group IDs found in folders: {args.folders}. Generating fallback command without filter.",
             file=sys.stderr,
         )
@@ -171,7 +190,7 @@ def main():
         # 3. Turn the Group IDs into Checkmarx regex strings (e.g., ^org\.apache.*)
         cx_filters = [f"^{re.escape(gid)}.*" for gid in group_ids]
         filter_str = ",".join(cx_filters)
-        print(
+        timestamp_print(
             f"[+] Found {len(group_ids)} unique Maven Group IDs.",
             file=sys.stderr,
         )
@@ -201,21 +220,51 @@ def main():
 
     # Output the generated command line string
     command_text = shlex.join(cx_cmd)
-    print("\n" + "=" * 40 + " GENERATED CHECKMARX COMMAND " + "=" * 40)
-    print(command_text)
-    print("=" * 109)
+    print()
+    timestamp_print("" + "=" * 40 + " GENERATED CHECKMARX COMMAND " + "=" * 40, file=sys.stdout)
+    timestamp_print(command_text, file=sys.stdout)
+    timestamp_print("=" * 109, file=sys.stdout)
 
+    cx_elapsed = 0.0
     if args.dry_run:
-        print("[i] Dry run enabled; not executing the cx command.", file=sys.stderr)
+        timestamp_print("[i] Dry run enabled; not executing the cx command.", file=sys.stderr)
+        total_elapsed = perf_counter() - total_start
+        timestamp_print(
+            "[+] Timing summary: Syft scan took %s, cx execution skipped, total elapsed %s." % (
+                format_duration(syft_elapsed), format_duration(total_elapsed)
+            ),
+            file=sys.stderr,
+        )
         return
 
     try:
         verbose_print("[>] Step 4: Execute the generated Checkmarx command.", args.verbose)
-        print("[*] Executing Checkmarx command...", file=sys.stderr)
+        timestamp_print("[*] Executing Checkmarx command...", file=sys.stderr)
+        cx_start = perf_counter()
         subprocess.run(cx_cmd, check=True)
+        cx_elapsed = perf_counter() - cx_start
     except subprocess.CalledProcessError as e:
-        print(f"[-] Error executing cx: {e}", file=sys.stderr)
+        cx_elapsed = perf_counter() - cx_start if "cx_start" in locals() else 0.0
+        timestamp_print(f"[-] Error executing cx: {e}", file=sys.stderr)
+        total_elapsed = perf_counter() - total_start
+        timestamp_print(
+            "[+] Timing summary: Syft %s, cx %s, total %s." % (
+                format_duration(syft_elapsed), format_duration(cx_elapsed), format_duration(total_elapsed)
+            ),
+            file=sys.stderr,
+        )
         sys.exit(e.returncode)
+
+    total_elapsed = perf_counter() - total_start
+    timestamp_print(
+        "[+] Timing summary: Syft %s, cx %s, other overhead %s, total %s." % (
+            format_duration(syft_elapsed),
+            format_duration(cx_elapsed),
+            format_duration(total_elapsed - syft_elapsed - cx_elapsed),
+            format_duration(total_elapsed),
+        ),
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":
